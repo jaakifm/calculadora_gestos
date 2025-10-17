@@ -1,5 +1,5 @@
-WIDTH = 1200
-HEIGHT = 1080
+WIDTH = 1300
+HEIGHT = 820
 
 buttonListValues = [['C', '<'],
                     ['7', '8', '9', '/'],  # ÷ cant be rendered, so well have to do with / :/
@@ -8,4 +8,4 @@ buttonListValues = [['C', '<'],
                     ['0', '.', '=', '+']]
 
 
-INDEX_CAMARA = 0  # Cambiar a 1 o 2 según tu dispositivo
+INDEX_CAMARA = 0  # Cambiar a 0, 1 o 2 según tu dispositivo
