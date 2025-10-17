@@ -11,10 +11,10 @@ cap = init_camera()
 detector = DetectorGestos()
 
 if not cap.isOpened():
-    print("❌ La cámara no se pudo inicializar")
+    print(" La cámara no se pudo inicializar")
     exit(1)
 else:
-    print("✅ Cámara inicializada correctamente")
+    print(" Cámara inicializada correctamente")
 
 cap.set(3, WIDTH)
 cap.set(4, HEIGHT)
