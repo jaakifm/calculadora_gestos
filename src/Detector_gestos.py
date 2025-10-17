@@ -19,7 +19,8 @@ class DetectorGestos:
         self.cooldown = cooldown
         self.gesto_confirmado = None
         self.tiempo_confirmacion = 0
-        self.tiempo_estabilidad = 0.5  # Tiempo que debe mantenerse el gesto
+        self.tiempo_estabilidad = 0.5
+        self.modo_operaciones = False  # Modo números por defecto
 
     def detectar(self, frame):
         imgRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -92,40 +93,72 @@ class DetectorGestos:
         
         return pulgar_abierto and indice_abierto and dedos_cerrados == 3
 
-    def _detectar_operacion(self, hand_landmarks, label):
-        """Detecta gestos de operaciones matemáticas"""
+    def _detectar_cambio_modo(self, hand_landmarks):
+        """Detecta gesto para cambiar modo: índice y meñique extendidos (cuernos)"""
         lm = hand_landmarks.landmark
         
-        indice = lm[8]
-        medio = lm[12]
-        anular = lm[16]
-        menique = lm[20]
-        muneca = lm[0]
+        indice_ext = lm[8].y < lm[6].y - 0.05
+        medio_cer = lm[12].y >= lm[10].y - 0.02
+        anular_cer = lm[16].y >= lm[14].y - 0.02
+        menique_ext = lm[20].y < lm[18].y - 0.05
+        pulgar_cer = abs(lm[4].x - lm[2].x) < 0.06
         
-        # Verificar qué dedos están extendidos
-        indice_ext = indice.y < lm[6].y - 0.05
-        medio_ext = medio.y < lm[10].y - 0.05
-        anular_ext = anular.y < lm[14].y - 0.05
-        menique_ext = menique.y < lm[18].y - 0.05
-        pulgar_ext = abs(lm[4].x - lm[2].x) > 0.08
+        return indice_ext and medio_cer and anular_cer and menique_ext and pulgar_cer
+
+    def _detectar_operacion_por_dedos(self, hand_landmarks):
+        """Detecta operaciones según número de dedos en modo operaciones"""
+        lm = hand_landmarks.landmark
         
-        # + : Índice y medio extendidos, resto cerrado
-        if indice_ext and medio_ext and not anular_ext and not menique_ext and not pulgar_ext:
+        # Contar solo índice, medio, anular (sin pulgar ni meñique)
+        indice_ext = lm[8].y < lm[6].y - 0.05
+        medio_ext = lm[12].y < lm[10].y - 0.05
+        anular_ext = lm[16].y < lm[14].y - 0.05
+        
+        dedos_operacion = sum([indice_ext, medio_ext, anular_ext])
+        
+        if dedos_operacion == 1 and indice_ext:
             return "+"
-        
-        # - : Solo índice extendido
-        if indice_ext and not medio_ext and not anular_ext and not menique_ext:
+        elif dedos_operacion == 2 and indice_ext and medio_ext:
             return "-"
-        
-        # × : Índice y meñique extendidos, medio y anular cerrados
-        if indice_ext and menique_ext and not medio_ext and not anular_ext:
+        elif dedos_operacion == 3 and indice_ext and medio_ext and anular_ext:
             return "×"
         
-        # ÷ : Índice, medio y anular extendidos, meñique cerrado
-        if indice_ext and medio_ext and anular_ext and not menique_ext and not pulgar_ext:
-            return "÷"
-        
         return None
+
+    def _detectar_pulgar_arriba(self, hand_landmarks):
+        """Detecta pulgar arriba (para división)"""
+        lm = hand_landmarks.landmark
+        pulgar_tip = lm[4]
+        pulgar_mcp = lm[2]
+        
+        # Pulgar arriba
+        pulgar_arriba = pulgar_tip.y < pulgar_mcp.y - 0.08
+        
+        # Resto de dedos cerrados
+        dedos_cerrados = 0
+        for id in [8, 12, 16, 20]:
+            if lm[id].y >= lm[id - 2].y - 0.02:
+                dedos_cerrados += 1
+        
+        return pulgar_arriba and dedos_cerrados >= 3
+
+    def _detectar_gesto_igual(self, hand_landmarks):
+        """Detecta gesto =: mano completamente abierta (5 dedos)"""
+        lm = hand_landmarks.landmark
+        
+        # Todos los dedos extendidos
+        dedos_ext = 0
+        
+        # Pulgar
+        if abs(lm[4].x - lm[2].x) > 0.08:
+            dedos_ext += 1
+        
+        # Índice, medio, anular, meñique
+        for id in [8, 12, 16, 20]:
+            if lm[id].y < lm[id - 2].y - 0.04:
+                dedos_ext += 1
+        
+        return dedos_ext == 5
 
     def _contar_dedos_dos_manos(self, manos, handedness):
         """Cuenta dedos totales de ambas manos"""
@@ -146,46 +179,52 @@ class DetectorGestos:
         handedness = getattr(self.results, "multi_handedness", None)
         gesto_detectado = None
 
-        # ========== DOS MANOS ==========
-        if len(manos) == 2:
-            # Verificar si es el gesto "="
-            palma1 = manos[0].landmark[9]
-            palma2 = manos[1].landmark[9]
-            
-            dist_x = abs((palma1.x - palma2.x) * W)
-            dist_y = abs((palma1.y - palma2.y) * H)
-            
-            if dist_x < 180 and dist_y < 80:
-                gesto_detectado = "="
-            else:
-                # Contar dedos totales (6-10)
-                total_dedos = self._contar_dedos_dos_manos(manos, handedness)
-                if 6 <= total_dedos <= 10:
-                    gesto_detectado = str(total_dedos)
-
         # ========== UNA MANO ==========
-        elif len(manos) == 1:
+        if len(manos) == 1:
             mano = manos[0]
             label = handedness[0].classification[0].label if handedness else "Right"
             
-            # 1. Detectar puño cerrado (0)
-            if self._detectar_puño_cerrado(mano):
-                gesto_detectado = "0"
+            # 1. Verificar gesto de cambio de modo (prioridad máxima)
+            if self._detectar_cambio_modo(mano):
+                gesto_detectado = "MODO_TOGGLE"
             
-            # 2. Detectar gesto C (Clear)
-            elif self._detectar_gesto_C(mano, label):
-                gesto_detectado = "C"
-            
-            # 3. Detectar operaciones
-            else:
-                operacion = self._detectar_operacion(mano, label)
-                if operacion:
-                    gesto_detectado = operacion
+            # 2. MODO OPERACIONES
+            elif self.modo_operaciones:
+                # División: pulgar arriba
+                if self._detectar_pulgar_arriba(mano):
+                    gesto_detectado = "÷"
                 else:
-                    # 4. Contar dedos (1-5)
+                    # Otras operaciones por dedos
+                    operacion = self._detectar_operacion_por_dedos(mano)
+                    if operacion:
+                        gesto_detectado = operacion
+            
+            # 3. MODO NÚMEROS
+            else:
+                # Puño cerrado (0)
+                if self._detectar_puño_cerrado(mano):
+                    gesto_detectado = "0"
+                
+                # Gesto C (Clear)
+                elif self._detectar_gesto_C(mano, label):
+                    gesto_detectado = "C"
+                
+                # Mano abierta (=)
+                elif self._detectar_gesto_igual(mano):
+                    gesto_detectado = "="
+                
+                # Números 1-5
+                else:
                     _, num_dedos = self._contar_dedos(mano, label)
                     if 1 <= num_dedos <= 5:
                         gesto_detectado = str(num_dedos)
+
+        # ========== DOS MANOS (solo en modo números) ==========
+        elif len(manos) == 2 and not self.modo_operaciones:
+            # Contar dedos totales (6-10)
+            total_dedos = self._contar_dedos_dos_manos(manos, handedness)
+            if 6 <= total_dedos <= 10:
+                gesto_detectado = str(total_dedos)
 
         # ========== SISTEMA DE CONFIRMACIÓN ==========
         now = time.time()
@@ -196,6 +235,9 @@ class DetectorGestos:
             self.tiempo_confirmacion = 0
             return None
         
+        # Gesto de cambio de modo tiene confirmación más rápida
+        tiempo_necesario = 0.3 if gesto_detectado == "MODO_TOGGLE" else self.tiempo_estabilidad
+        
         # Si es un gesto nuevo, iniciar confirmación
         if gesto_detectado != self.gesto_confirmado:
             self.gesto_confirmado = gesto_detectado
@@ -203,15 +245,28 @@ class DetectorGestos:
             return None
         
         # Si el gesto se mantiene estable el tiempo necesario
-        if (now - self.tiempo_confirmacion) >= self.tiempo_estabilidad:
+        if (now - self.tiempo_confirmacion) >= tiempo_necesario:
             # Verificar cooldown desde último gesto enviado
             if (now - self.last_time) >= self.cooldown:
+                # Cambiar modo si es el gesto toggle
+                if gesto_detectado == "MODO_TOGGLE":
+                    self.modo_operaciones = not self.modo_operaciones
+                    self.last_gesture = gesto_detectado
+                    self.last_time = now
+                    self.gesto_confirmado = None
+                    return "MODO_OP" if self.modo_operaciones else "MODO_NUM"
+                
+                # Gesto normal
                 self.last_gesture = gesto_detectado
                 self.last_time = now
-                self.gesto_confirmado = None  # Resetear para próximo gesto
+                self.gesto_confirmado = None
                 return gesto_detectado
         
         return None
+
+    def obtener_modo(self):
+        """Retorna el modo actual"""
+        return "OPERACIONES" if self.modo_operaciones else "NÚMEROS"
 
     def obtener_tiempo_restante(self):
         """Retorna el tiempo restante de cooldown"""
